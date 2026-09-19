@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import { ref, computed, watch } from 'vue';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, DeviceFilterState, BatteryRisk } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
@@ -8,11 +8,11 @@ function generateId(prefix: string) {
 
 export const useIotStore = defineStore('iot', () => {
   const devices = ref<Device[]>([
-    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5 },
-    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2 },
-    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0 },
-    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1 },
-    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8 },
+    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5, groupId: 'g3' },
+    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2, groupId: 'g1' },
+    { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0, groupId: 'g4' },
+    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1, groupId: 'g2' },
+    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8, groupId: 'g2' },
   ]);
   const fences = ref<Geofence[]>([
     { id: 'f1', name: '办公区域', center: { lat: 39.9042, lng: 116.4074 }, radius: 500, type: 'circle', alertOnEnter: false, alertOnExit: true, color: '#4caf50' },
@@ -80,6 +80,74 @@ export const useIotStore = defineStore('iot', () => {
     { id: 'g3', name: '办公区域', color: '#f57c00', description: '办公环境监测' },
     { id: 'g4', name: '室外设施', color: '#7b1fa2', description: '户外设备' },
   ]);
+
+  const defaultDeviceFilter = (): DeviceFilterState => ({ groupId: null, status: null, batteryRisk: null });
+  const DEVICE_FILTER_STORAGE_KEY = 'iot-device-filter';
+
+  function loadDeviceFilter(): DeviceFilterState {
+    const base = defaultDeviceFilter();
+    try {
+      const raw = localStorage.getItem(DEVICE_FILTER_STORAGE_KEY);
+      if (!raw) return base;
+      const parsed = JSON.parse(raw) as Partial<DeviceFilterState>;
+      return {
+        groupId: typeof parsed.groupId === 'string' ? parsed.groupId : null,
+        status: parsed.status === 'online' || parsed.status === 'offline' || parsed.status === 'alert' ? parsed.status : null,
+        batteryRisk: parsed.batteryRisk === 'high' || parsed.batteryRisk === 'medium' || parsed.batteryRisk === 'low' ? parsed.batteryRisk : null
+      };
+    } catch {
+      return base;
+    }
+  }
+
+  const deviceFilter = ref<DeviceFilterState>(loadDeviceFilter());
+
+  watch(deviceFilter, (filter) => {
+    try {
+      localStorage.setItem(DEVICE_FILTER_STORAGE_KEY, JSON.stringify(filter));
+    } catch {
+      // localStorage 不可用时忽略，筛选状态在本次会话内仍然有效
+    }
+  }, { deep: true });
+
+  function getBatteryRisk(battery: number): BatteryRisk {
+    if (battery < 20) return 'high';
+    if (battery < 50) return 'medium';
+    return 'low';
+  }
+
+  function matchesDeviceFilter(device: Device, filter: DeviceFilterState = deviceFilter.value): boolean {
+    if (filter.groupId && device.groupId !== filter.groupId) return false;
+    if (filter.status && device.status !== filter.status) return false;
+    if (filter.batteryRisk && getBatteryRisk(device.battery) !== filter.batteryRisk) return false;
+    return true;
+  }
+
+  const filteredDevices = computed<Device[]>(() =>
+    devices.value.filter(d => matchesDeviceFilter(d, deviceFilter.value))
+  );
+
+  const filteredDeviceCount = computed(() => filteredDevices.value.length);
+  const hasActiveFilter = computed(() =>
+    deviceFilter.value.groupId !== null ||
+    deviceFilter.value.status !== null ||
+    deviceFilter.value.batteryRisk !== null
+  );
+
+  function setDeviceFilter(patch: Partial<DeviceFilterState>) {
+    deviceFilter.value = { ...deviceFilter.value, ...patch };
+  }
+
+  function resetDeviceFilter() {
+    deviceFilter.value = defaultDeviceFilter();
+  }
+
+  // 条件变化后，被筛掉的高亮设备要同步清除，保证地图高亮、列表和详情一致
+  watch(filteredDevices, (list) => {
+    if (highlightedDeviceId.value && !list.some(d => d.id === highlightedDeviceId.value)) {
+      highlightedDeviceId.value = null;
+    }
+  });
 
   const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length);
   const offlineCount = computed(() => devices.value.filter(d => d.status === 'offline').length);
@@ -272,6 +340,7 @@ export const useIotStore = defineStore('iot', () => {
       lastSeen: new Date().toISOString()
     };
     devices.value.push(newDevice);
+    resetDeviceFilter();
     return id;
   }
 
@@ -860,6 +929,8 @@ export const useIotStore = defineStore('iot', () => {
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
+    deviceFilter, filteredDevices, filteredDeviceCount, hasActiveFilter,
+    getBatteryRisk, matchesDeviceFilter, setDeviceFilter, resetDeviceFilter,
     onlineCount, offlineCount, alertDeviceCount, deviceCount, fenceCount, alertCount, selectedFence,
     avgBattery, avgTemperature, lowBatteryCount, devicesRanked, recentAlerts,
     unacknowledgedAlerts, criticalAlerts, warningAlerts, infoAlerts,

@@ -12,6 +12,14 @@ export interface DeviceThresholds {
   offlineTimeout: number;
 }
 
+export type BatteryRisk = 'high' | 'medium' | 'low';
+
+export interface DeviceFilterState {
+  groupId: string | null;
+  status: Device['status'] | null;
+  batteryRisk: BatteryRisk | null;
+}
+
 export interface DeviceGroup {
   id: string;
   name: string;
