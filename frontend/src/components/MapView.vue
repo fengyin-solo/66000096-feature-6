@@ -564,7 +564,7 @@ function renderAllDevices() {
   deviceLayers.value.forEach(d => map.value!.removeLayer(d));
   deviceLayers.value.clear();
 
-  store.devices.forEach(d => {
+  store.filteredDevices.forEach(d => {
     const isHighlighted = store.highlightedDeviceId === d.id;
     const color = d.status === 'online' ? '#4caf50' : d.status === 'alert' ? '#e53935' : '#9e9e9e';
     const baseRadius = 8;
@@ -835,6 +835,10 @@ watch(() => store.editMode, (newMode) => {
 watch(() => store.devices, () => {
   renderAllDevices();
 }, { deep: true });
+
+watch(() => store.filteredDevices, () => {
+  renderAllDevices();
+});
 
 watch(() => store.highlightedDeviceId, (newId, oldId) => {
   renderAllDevices();

@@ -6,6 +6,17 @@ export interface Device {
   thresholds?: DeviceThresholds;
 }
 
+export type DeviceStatusFilter = 'all' | Device['status'];
+// critical: <20% 电量风险, low: 20%-49% 电量偏低, normal: >=50% 电量正常
+export type BatteryRiskFilter = 'all' | 'critical' | 'low' | 'normal';
+export type DeviceGroupFilter = string; // 'all' | 'none'(未分组) | group id
+
+export interface DeviceFilterState {
+  groupId: DeviceGroupFilter;
+  status: DeviceStatusFilter;
+  batteryRisk: BatteryRiskFilter;
+}
+
 export interface DeviceThresholds {
   lowBattery: number;
   highTemperature: number;

@@ -1,18 +1,36 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import { ref, computed, watch } from 'vue';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, DeviceFilterState, DeviceStatusFilter, BatteryRiskFilter, DeviceGroupFilter } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
 }
 
+const DEVICE_FILTER_STORAGE_KEY = 'iot-device-filters';
+
+function loadDeviceFilters(): DeviceFilterState {
+  const fallback: DeviceFilterState = { groupId: 'all', status: 'all', batteryRisk: 'all' };
+  try {
+    const raw = localStorage.getItem(DEVICE_FILTER_STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return {
+      groupId: typeof parsed.groupId === 'string' ? parsed.groupId : 'all',
+      status: ['all', 'online', 'offline', 'alert'].includes(parsed.status) ? parsed.status : 'all',
+      batteryRisk: ['all', 'critical', 'low', 'normal'].includes(parsed.batteryRisk) ? parsed.batteryRisk : 'all'
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export const useIotStore = defineStore('iot', () => {
   const devices = ref<Device[]>([
-    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5 },
-    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2 },
+    { id: 'd1', name: '传感器-A01', lat: 39.9042, lng: 116.4074, status: 'online', lastSeen: new Date().toISOString(), battery: 85, temperature: 24.5, groupId: 'g1' },
+    { id: 'd2', name: '传感器-B02', lat: 39.9142, lng: 116.3974, status: 'alert', lastSeen: new Date().toISOString(), battery: 12, temperature: 38.2, groupId: 'g1' },
     { id: 'd3', name: '追踪器-C03', lat: 39.8942, lng: 116.4174, status: 'offline', lastSeen: new Date(Date.now() - 3600000).toISOString(), battery: 0, temperature: 0 },
-    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1 },
-    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8 },
+    { id: 'd4', name: '传感器-D04', lat: 39.9082, lng: 116.4024, status: 'online', lastSeen: new Date().toISOString(), battery: 45, temperature: 26.1, groupId: 'g2' },
+    { id: 'd5', name: '追踪器-E05', lat: 39.8992, lng: 116.4104, status: 'online', lastSeen: new Date().toISOString(), battery: 92, temperature: 23.8, groupId: 'g2' },
   ]);
   const fences = ref<Geofence[]>([
     { id: 'f1', name: '办公区域', center: { lat: 39.9042, lng: 116.4074 }, radius: 500, type: 'circle', alertOnEnter: false, alertOnExit: true, color: '#4caf50' },
@@ -60,6 +78,17 @@ export const useIotStore = defineStore('iot', () => {
   const highlightedDeviceId = ref<string | null>(null);
   const isRegisteringDevice = ref(false);
   const registrationLocation = ref<{ lat: number; lng: number } | null>(null);
+
+  // 设备列表组合筛选（分组 + 状态 + 电量风险），持久化到 localStorage
+  const deviceFilters = ref<DeviceFilterState>(loadDeviceFilters());
+
+  watch(deviceFilters, (filters) => {
+    try {
+      localStorage.setItem(DEVICE_FILTER_STORAGE_KEY, JSON.stringify(filters));
+    } catch {
+      // localStorage 不可用时静默降级，筛选在本次会话内仍然有效
+    }
+  }, { deep: true });
 
   const trackPlaybackEnabled = ref(false);
   const trackData = ref<TrackData | null>(null);
@@ -110,6 +139,59 @@ export const useIotStore = defineStore('iot', () => {
       if (statusDiff !== 0) return statusDiff;
       return b.battery - a.battery;
     });
+  });
+
+  // 电量风险分级：critical < 20%, low 20%-49%, normal >= 50%
+  function getBatteryRisk(battery: number): Exclude<BatteryRiskFilter, 'all'> {
+    if (battery < 20) return 'critical';
+    if (battery < 50) return 'low';
+    return 'normal';
+  }
+
+  function matchesDeviceFilters(device: Device, filters: DeviceFilterState = deviceFilters.value): boolean {
+    if (filters.groupId !== 'all') {
+      const group = device.groupId || 'none';
+      if (group !== filters.groupId) return false;
+    }
+    if (filters.status !== 'all' && device.status !== filters.status) return false;
+    if (filters.batteryRisk !== 'all' && getBatteryRisk(device.battery) !== filters.batteryRisk) return false;
+    return true;
+  }
+
+  const filteredDevices = computed<Device[]>(() =>
+    devices.value.filter(d => matchesDeviceFilters(d))
+  );
+
+  const filteredDeviceCount = computed(() => filteredDevices.value.length);
+
+  const hasActiveFilters = computed(() =>
+    deviceFilters.value.groupId !== 'all' ||
+    deviceFilters.value.status !== 'all' ||
+    deviceFilters.value.batteryRisk !== 'all'
+  );
+
+  function setDeviceGroupFilter(groupId: DeviceGroupFilter) {
+    deviceFilters.value = { ...deviceFilters.value, groupId };
+  }
+
+  function setDeviceStatusFilter(status: DeviceStatusFilter) {
+    deviceFilters.value = { ...deviceFilters.value, status };
+  }
+
+  function setDeviceBatteryRiskFilter(risk: BatteryRiskFilter) {
+    deviceFilters.value = { ...deviceFilters.value, batteryRisk: risk };
+  }
+
+  function clearDeviceFilters() {
+    deviceFilters.value = { groupId: 'all', status: 'all', batteryRisk: 'all' };
+  }
+
+  // 条件变化后高亮设备、列表计数和详情保持一致：
+  // 当前高亮设备被筛选掉时，清除高亮（同步关闭地图详情弹窗）
+  watch(filteredDevices, (list) => {
+    if (highlightedDeviceId.value && !list.some(d => d.id === highlightedDeviceId.value)) {
+      highlightedDeviceId.value = null;
+    }
   });
 
   const recentAlerts = computed(() => {
@@ -272,6 +354,11 @@ export const useIotStore = defineStore('iot', () => {
       lastSeen: new Date().toISOString()
     };
     devices.value.push(newDevice);
+    // 注册完成后定位到新设备：若当前筛选会把新设备过滤掉，先清除筛选条件，
+    // 保证注册 → 高亮/详情的既有行为不受筛选影响
+    if (!matchesDeviceFilters(newDevice)) {
+      clearDeviceFilters();
+    }
     return id;
   }
 
@@ -862,6 +949,9 @@ export const useIotStore = defineStore('iot', () => {
     isRegisteringDevice, registrationLocation, groups,
     onlineCount, offlineCount, alertDeviceCount, deviceCount, fenceCount, alertCount, selectedFence,
     avgBattery, avgTemperature, lowBatteryCount, devicesRanked, recentAlerts,
+    deviceFilters, filteredDevices, filteredDeviceCount, hasActiveFilters,
+    getBatteryRisk, matchesDeviceFilters,
+    setDeviceGroupFilter, setDeviceStatusFilter, setDeviceBatteryRiskFilter, clearDeviceFilters,
     unacknowledgedAlerts, criticalAlerts, warningAlerts, infoAlerts,
     criticalCount, warningCount, infoCount,
     trackPlaybackEnabled, trackData, playbackDeviceId,
